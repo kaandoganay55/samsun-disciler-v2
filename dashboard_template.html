@@ -1,0 +1,579 @@
+<title>Samsun Diş Klinikleri — Web Altyapı Taraması</title>
+<style>
+  :root {
+    --page:        #f5f4ef;
+    --surface:     #ffffff;
+    --ink:         #14161a;
+    --ink-2:       #5a5d64;
+    --muted:       #8b8d93;
+    --line:        #e7e5dd;
+    --accent:      #2454c7;
+    --accent-soft: #e8edfa;
+    --violet:      #4a3aa7;
+    --violet-soft: #ece9f7;
+    --warn:        #fab219;
+    --warn-soft:   #fdf0d6;
+    --warn-ink:    #6b4a05;
+    --crit:        #d03b3b;
+    --crit-soft:   #fbe6e6;
+    --shadow: 0 1px 2px rgba(20,22,26,0.04), 0 6px 16px rgba(20,22,26,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:        #0d0d0d;
+      --surface:     #1a1a19;
+      --ink:         #ffffff;
+      --ink-2:       #c3c2b7;
+      --muted:       #898781;
+      --line:        #2c2c2a;
+      --accent:      #3987e5;
+      --accent-soft: #16273f;
+      --violet:      #9085e9;
+      --violet-soft: #262143;
+      --warn:        #fab219;
+      --warn-soft:   #3a2c0c;
+      --warn-ink:    #f0c360;
+      --crit:        #e66767;
+      --crit-soft:   #3a1c1c;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 6px 20px rgba(0,0,0,0.35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .viz-root {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 44px 24px 88px;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  h1 {
+    font-size: clamp(27px, 4vw, 36px);
+    font-weight: 800;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin: 0 0 10px;
+    text-wrap: balance;
+  }
+  h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+
+  .meta {
+    color: var(--ink-2);
+    font-size: 14.5px;
+    line-height: 1.65;
+    margin: 0 0 36px;
+    max-width: 66ch;
+  }
+  .meta b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 40px;
+  }
+  .tile {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 18px 18px 16px;
+  }
+  .tile .ico {
+    width: 20px;
+    height: 20px;
+    margin-bottom: 12px;
+    color: var(--muted);
+  }
+  .tile.accent .ico { color: var(--accent); }
+  .tile.warn .ico { color: var(--warn-ink); }
+  @media (prefers-color-scheme: dark) { .tile.warn .ico { color: var(--warn); } }
+  .tile.crit .ico { color: var(--crit); }
+  .tile .n {
+    font-size: 30px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    margin-bottom: 7px;
+    letter-spacing: -0.01em;
+  }
+  .tile .l { font-size: 12.5px; color: var(--ink-2); line-height: 1.35; }
+  .tile.accent .n { color: var(--accent); }
+  .tile.warn .n { color: var(--warn-ink); }
+  @media (prefers-color-scheme: dark) { .tile.warn .n { color: var(--warn); } }
+  .tile.crit .n { color: var(--crit); }
+
+  @media (max-width: 640px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  h2 {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    margin: 0 0 18px;
+  }
+  h2 .count { color: var(--muted); font-weight: 600; letter-spacing: normal; text-transform: none; font-size: 12.5px; }
+  section { margin-bottom: 44px; }
+
+  .panel-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 22px 22px 18px;
+  }
+
+  .bars { display: flex; flex-direction: column; gap: 11px; }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 150px 1fr 40px;
+    align-items: center;
+    gap: 12px;
+  }
+  .bar-row .label {
+    font-size: 13.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .bar-track {
+    height: 20px;
+    background: var(--line);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .bar-fill { height: 100%; border-radius: 5px; transition: filter 0.15s ease, width 0.3s ease; }
+  .bar-row:hover .bar-fill { filter: brightness(1.08); }
+  .bar-row .count {
+    font-size: 13.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .bars-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 9px 28px;
+  }
+  @media (max-width: 700px) {
+    .bars-grid { grid-template-columns: 1fr; }
+  }
+  .bars-grid .bar-row { grid-template-columns: 108px 1fr 30px; }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .chip {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-2);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 13px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--ink); }
+  .chip[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--surface); }
+  @media (prefers-color-scheme: dark) {
+    .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  }
+
+  .select, .search {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 30px 7px 13px;
+    border-radius: 999px;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b8d93' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+  }
+  .search { cursor: text; font-weight: 500; margin-left: auto; min-width: 210px; appearance: initial; background-image: none; padding: 7px 13px; }
+  .select:focus, .search:focus, .chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .table-wrap {
+    overflow: auto;
+    max-height: 620px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+  }
+  table { border-collapse: collapse; width: 100%; min-width: 700px; }
+  thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+  tbody td { padding: 11px 14px; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: top; }
+  tbody tr:nth-child(even) { background: color-mix(in srgb, var(--ink) 2%, transparent); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  td.name { font-weight: 600; max-width: 260px; }
+  td.addr { color: var(--ink-2); max-width: 200px; }
+  td.district { color: var(--ink-2); white-space: nowrap; }
+  td.site a { color: var(--accent); text-decoration: none; }
+  td.site a:hover { text-decoration: underline; }
+  td.site .none { color: var(--muted); }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 4px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .pill svg { width: 11px; height: 11px; flex: none; }
+  .pill.p-wp { background: var(--accent-soft); color: var(--accent); }
+  .pill.p-custom { background: var(--violet-soft); color: var(--violet); }
+  .pill.p-none { background: var(--warn-soft); color: var(--warn-ink); }
+  @media (prefers-color-scheme: dark) { .pill.p-none { color: var(--warn); } }
+  .pill.p-error { background: var(--crit-soft); color: var(--crit); }
+
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+  .empty { padding: 40px 14px; text-align: center; color: var(--muted); font-size: 13.5px; }
+
+  footer {
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.65;
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+    max-width: 66ch;
+  }
+  footer code {
+    background: var(--line);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 11.5px;
+  }
+
+  /* --- mobil uyum --- */
+  @media (max-width: 640px) {
+    .viz-root { padding: 28px 14px 56px; }
+    .meta { font-size: 13.5px; margin-bottom: 28px; }
+    .panel-card { padding: 16px 14px 14px; }
+    section { margin-bottom: 32px; }
+
+    .bar-row { grid-template-columns: 92px 1fr 32px; gap: 8px; }
+    .bar-row .label { font-size: 12.5px; }
+    .bars-grid .bar-row { grid-template-columns: 84px 1fr 26px; }
+
+    .controls { gap: 6px; }
+    .chip { font-size: 12.5px; padding: 6px 11px; }
+    .select { font-size: 12.5px; }
+    .search {
+      margin-left: 0;
+      min-width: 0;
+      width: 100%;
+      order: 99; /* filtrelerin altina, tam genislik */
+    }
+
+    .table-wrap { max-height: 70vh; border-radius: 12px; }
+    table { min-width: 560px; }
+    thead th { font-size: 10px; padding: 10px 10px; }
+    tbody td { font-size: 12.5px; padding: 9px 10px; }
+    td.name { max-width: 160px; }
+    thead th:nth-child(3), tbody td:nth-child(3) { display: none; } /* Adres: ilce zaten konumu veriyor, yatay kaydirmada yer kaplamasin */
+    .pill { font-size: 11px; padding: 3px 8px; }
+    .pill svg { width: 10px; height: 10px; }
+  }
+
+  @media (max-width: 380px) {
+    .tiles { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .tile { padding: 14px 14px 12px; }
+    .tile .n { font-size: 24px; }
+  }
+</style>
+
+<div class="viz-root">
+  <p class="eyebrow">Teknoloji Tarama Raporu</p>
+  <h1>Samsun Diş Klinikleri — Web <em>Altyapı</em> Taraması</h1>
+  <p class="meta">
+    Google Places API üzerinden Samsun'un <b id="metaDistricts">0</b> ilçesi ve
+    farklı anahtar kelimeler taranarak bulunan <b id="metaTotal">0</b>
+    işletmenin web sitesi incelenip kullandıkları altyapı (CMS/framework)
+    tespit edildi. Tarama: <b id="metaQueries">0</b> farklı sorgu ·
+    <b id="metaDate">—</b>.
+  </p>
+
+  <div class="tiles">
+    <div class="tile">
+      <svg class="ico" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="2.5" width="6" height="6" rx="1.3" stroke="currentColor" stroke-width="1.4"/><rect x="11.5" y="2.5" width="6" height="6" rx="1.3" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="11.5" width="6" height="6" rx="1.3" stroke="currentColor" stroke-width="1.4"/><rect x="11.5" y="11.5" width="6" height="6" rx="1.3" stroke="currentColor" stroke-width="1.4"/></svg>
+      <div class="n" id="tTotal">0</div><div class="l">Toplam işletme</div>
+    </div>
+    <div class="tile accent">
+      <svg class="ico" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M3 10h14M10 3c2.3 2 2.3 12 0 14M10 3c-2.3 2-2.3 12 0 14" stroke="currentColor" stroke-width="1.3"/></svg>
+      <div class="n" id="tSite">0</div><div class="l">Websitesi var</div>
+    </div>
+    <div class="tile warn">
+      <svg class="ico" viewBox="0 0 20 20" fill="none"><path d="M10 2.5 2 17h16L10 2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M10 8v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="10" cy="14.3" r="0.9" fill="currentColor"/></svg>
+      <div class="n" id="tNoSite">0</div><div class="l">Website yok</div>
+    </div>
+    <div class="tile crit">
+      <svg class="ico" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4"/><path d="M7.5 7.5l5 5M12.5 7.5l-5 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <div class="n" id="tError">0</div><div class="l">Bağlantı sorunu</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Genel Dağılım</h2>
+    <div class="panel-card">
+      <div class="bars" id="bars"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>İlçelere Göre Dağılım <span class="count" id="districtCount"></span></h2>
+    <div class="panel-card">
+      <div class="bars bars-grid" id="districtBars"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>İşletme Listesi</h2>
+    <div class="controls" id="filters"></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>İşletme</th><th>İlçe</th><th>Adres</th><th>Website</th><th>Durum</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <p class="hint">Bağlantı sorunu olan satırların üzerine gelerek hata detayını görebilirsin.</p>
+  </section>
+
+  <footer>
+    Kaynak: Google Places API (Text Search + Place Details). Altyapı tespiti; HTTP
+    yanıt başlıkları ve HTML içeriğindeki imzalar (wp-content, wp-json, vb.)
+    üzerinden yapılır — imza bulunamayan siteler "Bilinmiyor / Özel Kod" olarak
+    işaretlenir, bu her zaman özel yazılım anlamına gelmez. Bu dosya
+    <code>api_versiyon.py</code> her çalıştığında yeniden üretilir.
+  </footer>
+</div>
+
+<script>
+  const DATA = /*__DATA__*/[];
+  const META = /*__META__*/{"generatedAt": "", "queryCount": 0};
+
+  const STATUS = {
+    "WordPress":            { key: "wp",     label: "WordPress",            cls: "p-wp" },
+    "Bilinmiyor / özel kod":{ key: "custom", label: "Bilinmiyor / Özel Kod", cls: "p-custom" },
+    "Website yok":          { key: "none",   label: "Website Yok",          cls: "p-none" },
+    "error":                { key: "error",  label: "Bağlantı Hatası",      cls: "p-error" }
+  };
+
+  function statusOf(row) {
+    if (row.error) return STATUS.error;
+    return STATUS[row.detected] || STATUS.error;
+  }
+
+  const ICONS = {
+    wp:     '<svg viewBox="0 0 16 16" fill="none"><path d="M2.5 8l3 4.5L8 4l2.5 8.5L13.5 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    custom: '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.2" stroke="currentColor" stroke-width="1.6"/></svg>',
+    none:   '<svg viewBox="0 0 16 16" fill="none"><path d="M8 2 1.5 13.5h13L8 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.3v3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.6" r=".9" fill="currentColor"/></svg>',
+    error:  '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.6"/><path d="M6.2 6.2l3.6 3.6M9.8 6.2l-3.6 3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>'
+  };
+
+  const total = DATA.length;
+  document.getElementById("tTotal").textContent = total;
+  document.getElementById("tSite").textContent = DATA.filter(d => d.website).length;
+  document.getElementById("tNoSite").textContent = DATA.filter(d => d.detected === "Website yok").length;
+  document.getElementById("tError").textContent = DATA.filter(d => d.error).length;
+  document.getElementById("metaTotal").textContent = total;
+  document.getElementById("metaQueries").textContent = META.queryCount;
+  document.getElementById("metaDate").textContent = META.generatedAt;
+
+  // --- genel dagilim ---
+  const counts = { wp: 0, custom: 0, none: 0, error: 0 };
+  DATA.forEach(d => counts[statusOf(d).key]++);
+  const order = ["wp", "custom", "none", "error"];
+  const maxCount = Math.max(1, ...order.map(k => counts[k]));
+  const labelByKey = { wp: "WordPress", custom: "Bilinmiyor / Özel Kod", none: "Website Yok", error: "Bağlantı Hatası" };
+  const colorByKey = { wp: "var(--accent)", custom: "var(--violet)", none: "var(--warn)", error: "var(--crit)" };
+
+  const barsEl = document.getElementById("bars");
+  order.forEach(key => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.title = `${labelByKey[key]}: ${counts[key]} işletme (%${total ? Math.round(counts[key] / total * 100) : 0})`;
+    row.innerHTML = `
+      <div class="label">${labelByKey[key]}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(counts[key] / maxCount * 100).toFixed(1)}%; background:${colorByKey[key]}"></div></div>
+      <div class="count">${counts[key]}</div>
+    `;
+    barsEl.appendChild(row);
+  });
+
+  // --- ilcelere gore dagilim ---
+  const districtCounts = {};
+  DATA.forEach(d => { const k = d.district || "Diğer"; districtCounts[k] = (districtCounts[k] || 0) + 1; });
+  const districtEntries = Object.entries(districtCounts).sort((a, b) => b[1] - a[1]);
+  const maxDistrict = Math.max(1, ...districtEntries.map(e => e[1]));
+  document.getElementById("districtCount").textContent = `${districtEntries.length} ilçe`;
+  document.getElementById("metaDistricts").textContent = districtEntries.length;
+
+  const districtBarsEl = document.getElementById("districtBars");
+  districtEntries.forEach(([name, count]) => {
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.title = `${name}: ${count} işletme (%${total ? Math.round(count / total * 100) : 0})`;
+    row.innerHTML = `
+      <div class="label">${name}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(count / maxDistrict * 100).toFixed(1)}%; background:var(--accent)"></div></div>
+      <div class="count">${count}</div>
+    `;
+    districtBarsEl.appendChild(row);
+  });
+
+  // --- filtreler ---
+  const filtersEl = document.getElementById("filters");
+  const filterDefs = [
+    { key: "all", label: `Tümü (${total})` },
+    { key: "none", label: `Website Yok (${counts.none})` },
+    { key: "error", label: `Bağlantı Hatası (${counts.error})` },
+    { key: "custom", label: `Özel Kod (${counts.custom})` },
+    { key: "wp", label: `WordPress (${counts.wp})` }
+  ];
+  let activeFilter = "all";
+  let activeDistrict = "all";
+  let searchTerm = "";
+
+  filterDefs.forEach((f, i) => {
+    const btn = document.createElement("button");
+    btn.className = "chip";
+    btn.textContent = f.label;
+    btn.setAttribute("aria-pressed", i === 0 ? "true" : "false");
+    btn.addEventListener("click", () => {
+      activeFilter = f.key;
+      [...filtersEl.querySelectorAll(".chip")].forEach(c => c.setAttribute("aria-pressed", "false"));
+      btn.setAttribute("aria-pressed", "true");
+      render();
+    });
+    filtersEl.appendChild(btn);
+  });
+
+  const districtSelect = document.createElement("select");
+  districtSelect.className = "select";
+  districtSelect.innerHTML = `<option value="all">Tüm ilçeler</option>` +
+    districtEntries.map(([name, count]) => `<option value="${name}">${name} (${count})</option>`).join("");
+  districtSelect.addEventListener("change", () => { activeDistrict = districtSelect.value; render(); });
+  filtersEl.appendChild(districtSelect);
+
+  const search = document.createElement("input");
+  search.className = "search";
+  search.type = "search";
+  search.placeholder = "İsim veya adrese göre ara…";
+  search.addEventListener("input", () => { searchTerm = search.value.trim().toLowerCase(); render(); });
+  filtersEl.appendChild(search);
+
+  // --- tablo (fırsatlar en üstte) ---
+  const priority = { none: 0, error: 1, custom: 2, wp: 3 };
+  const sorted = [...DATA].sort((a, b) => priority[statusOf(a).key] - priority[statusOf(b).key]);
+
+  function domainOf(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
+  }
+
+  const tbody = document.getElementById("tbody");
+
+  function render() {
+    const rows = sorted.filter(d => {
+      const st = statusOf(d);
+      if (activeFilter !== "all" && st.key !== activeFilter) return false;
+      if (activeDistrict !== "all" && d.district !== activeDistrict) return false;
+      if (searchTerm && !(d.name.toLowerCase().includes(searchTerm) || d.address.toLowerCase().includes(searchTerm))) return false;
+      return true;
+    });
+
+    tbody.innerHTML = "";
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">Eşleşen işletme yok.</td></tr>`;
+      return;
+    }
+
+    rows.forEach(d => {
+      const st = statusOf(d);
+      const tr = document.createElement("tr");
+      if (d.error) tr.title = d.error;
+      const siteCell = d.website
+        ? `<a href="${d.website}" target="_blank" rel="noopener noreferrer">${domainOf(d.website)}</a>`
+        : `<span class="none">—</span>`;
+      tr.innerHTML = `
+        <td class="name">${d.name}</td>
+        <td class="district">${d.district || "Diğer"}</td>
+        <td class="addr">${d.address}</td>
+        <td class="site">${siteCell}</td>
+        <td><span class="pill ${st.cls}">${ICONS[st.key]}${st.label}</span></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  render();
+</script>
