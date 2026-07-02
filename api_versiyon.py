@@ -40,6 +40,7 @@ API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
 OUTPUT_CSV = "samsun_disciler_altyapi.csv"
 TEMPLATE_FILE = "dashboard_template.html"
 OUTPUT_DASHBOARD = "index.html"
+KNOWN_PLACES_FILE = "known_places.json"
 REQUEST_TIMEOUT = 10
 
 TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
@@ -232,11 +233,41 @@ FINGERPRINTS = {
 def get_place_details(place_id):
     params = {
         "place_id": place_id,
-        "fields": "name,website,formatted_address",
+        "fields": "name,website,formatted_address,rating,user_ratings_total",
         "key": API_KEY,
     }
     resp = requests.get(DETAILS_URL, params=params, timeout=REQUEST_TIMEOUT).json()
     return resp.get("result", {})
+
+
+def load_known_places():
+    """Onceki taramalarda gorulen place_id -> ilk gorulme tarihi. Dosya yoksa
+    bu ilk calistirmadir; o durumda hicbir isletme 'yeni' olarak isaretlenmez
+    (aksi halde ilk calistirmada TUM isletmeler yanlislikla 'yeni' gorunur)."""
+    is_first_run = not os.path.exists(KNOWN_PLACES_FILE)
+    known = {}
+    if not is_first_run:
+        with open(KNOWN_PLACES_FILE, encoding="utf-8") as f:
+            known = json.load(f)
+    return known, is_first_run
+
+
+def save_known_places(known, current_ids, is_first_run):
+    """Gorulen her place_id'yi (ilk gorulme tarihiyle) kalici dosyaya yazar;
+    yeni isletmeleri de (bir sonraki taramada 'eski' sayilmalari icin) ekler.
+    Dondurdugu set, BU taramada gercekten yeni olan (bootstrap degil) id'ler."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    new_ids = set()
+    for pid in current_ids:
+        if pid not in known:
+            known[pid] = today
+            if not is_first_run:
+                new_ids.add(pid)
+
+    with open(KNOWN_PLACES_FILE, "w", encoding="utf-8") as f:
+        json.dump(known, f, ensure_ascii=False, indent=0)
+
+    return new_ids
 
 
 def detect_stack(url):
@@ -338,10 +369,13 @@ def build_rows(places):
         address = details.get("formatted_address") or place.get("formatted_address", "") or place.get("vicinity", "")
 
         row = {
+            "place_id": place["place_id"],
             "name": details.get("name") or place.get("name", ""),
             "address": address,
             "district": extract_district(address),
             "website": website,
+            "rating": details.get("rating", ""),
+            "review_count": details.get("user_ratings_total", ""),
             "detected": "",
             "server_header": "",
             "x_powered_by": "",
@@ -375,7 +409,7 @@ def build_rows(places):
 
 
 def write_csv(rows, path):
-    fieldnames = ["name", "address", "district", "website", "detected", "server_header", "x_powered_by", "status_code", "error"]
+    fieldnames = ["place_id", "name", "address", "district", "website", "rating", "review_count", "detected", "server_header", "x_powered_by", "status_code", "error", "is_new"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -394,6 +428,9 @@ def write_dashboard(rows, path, template_path, query_count):
             "website": r["website"],
             "detected": r["detected"],
             "error": r["error"],
+            "rating": r["rating"] or None,
+            "reviewCount": r["review_count"] or 0,
+            "isNew": bool(r.get("is_new")),
         }
         for r in rows
     ]
@@ -425,8 +462,18 @@ def main():
     places = collect_places()
     rows = build_rows(places)
 
+    known, is_first_run = load_known_places()
+    current_ids = {r["place_id"] for r in rows}
+    new_ids = save_known_places(known, current_ids, is_first_run)
+    for r in rows:
+        r["is_new"] = r["place_id"] in new_ids
+    if is_first_run:
+        print(f"\n{KNOWN_PLACES_FILE} ilk kez oluşturuldu, bu taramada hiçbir işletme 'yeni' işaretlenmedi (referans temeli).")
+    else:
+        print(f"\nBu taramada gerçekten yeni tespit edilen işletme: {len(new_ids)}")
+
     write_csv(rows, OUTPUT_CSV)
-    print(f"\nCSV yazıldı: {OUTPUT_CSV} ({len(rows)} satır)")
+    print(f"CSV yazıldı: {OUTPUT_CSV} ({len(rows)} satır)")
 
     total_query_count = len(SEARCH_QUERIES) + len(build_grid())
     write_dashboard(rows, OUTPUT_DASHBOARD, TEMPLATE_FILE, total_query_count)
