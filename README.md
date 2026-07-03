@@ -1,20 +1,29 @@
-# Samsun Diş Klinikleri - Web Altyapı Taraması (v2)
+# Karadeniz Diş Klinikleri - Web Altyapı Taraması (v2)
 
-Samsun'daki diş klinikleri/diş hekimlerini bulur, web sitelerini tarar ve
-hangi altyapıyı (WordPress, özel kod, vb.) kullandıklarını tespit eder.
+Karadeniz bölgesindeki (18 il, varsayılan modda sadece Samsun) diş
+klinikleri/diş hekimlerini bulur, web sitelerini tarar ve hangi altyapıyı
+(WordPress, özel kod, vb.) kullandıklarını tespit eder.
 
 İşletme keşfi iki yöntemin birleşimiyle yapılır:
 
-- **Text Search**: anahtar kelime + ilçe metniyle arama (17 anahtar kelime ×
-  17 ilçe + genel sorgular)
-- **Grid + Nearby Search**: Samsun'u sabit aralıklı koordinat noktalarına
-  bölüp her noktada `type=dentist` ile arama. Yoğun bölgelerde (60 sonuç
-  tavanına çarpılırsa) o nokta otomatik olarak küçük yarıçaplı alt
-  noktalara bölünür.
+- **Text Search**: anahtar kelime × (il + ilçe) sorguları. Samsun için 20
+  anahtar kelimelik geniş liste, diğer iller için 7 kelimelik çekirdek liste
+  (maliyet kontrolü).
+- **Grid + Nearby Search** (sadece Samsun): il sabit aralıklı koordinat
+  noktalarına bölünüp her noktada iki geçiş yapılır (`type=dentist` +
+  `keyword=diş`). Yoğun bölgelerde (60 sonuç tavanına çarpılırsa) nokta
+  otomatik olarak küçük yarıçaplı alt noktalara bölünür (quad-tree).
 
-İki yöntemin sonucu `place_id`'ye göre tekilleştirilip birleştirilir. Tüm
-ağır işlemler (Text Search sorguları, grid noktaları, Place Details +
-website taraması) paralel çalışır.
+Sonuçlar `place_id`'ye göre tekilleştirilir. Tüm API çağrıları kota/ağ
+hatalarında üstel bekleme ile yeniden denenir; kalıcı başarısız sorgular
+çalışma sonunda raporlanır (sessiz veri kaybı olmaz).
+
+## Kalıcı veritabanı (`places_db.json`)
+
+Görülen her işletme `first_seen`/`last_seen` tarihleriyle saklanır. Dar
+kapsamlı tarama (haftalık Samsun) geniş taramanın (aylık Karadeniz)
+sonuçlarını **silmez**, sadece kendi kapsamını tazeler. Panel her zaman
+veritabanının tamamını gösterir. 120 gündür görülmeyen kayıtlar düşürülür.
 
 ## Kurulum
 
@@ -30,30 +39,32 @@ Bir Google Places API key al (console.cloud.google.com → proje oluştur →
 
 ```
 export GOOGLE_PLACES_API_KEY="senin-keyin"
-python3 api_versiyon.py
+
+SCAN_SCOPE=samsun     python3 api_versiyon.py   # varsayılan: sadece Samsun
+SCAN_SCOPE=karadeniz  python3 api_versiyon.py   # 18 ilin tamamı
+SCAN_SCOPE="Samsun,Ordu,Trabzon" python3 api_versiyon.py  # seçili iller
 ```
 
 ## Çıktılar
 
-- `samsun_disciler_altyapi.csv` — ham veri
-- `index.html` — tarayıcıda çift tıklayarak açılan görsel panel (özet
-  sayılar, genel + ilçe bazlı dağılım grafiği, filtrelenebilir/aranabilir
-  liste). Script her çalıştığında bu dosya güncel veriyle yeniden üretilir.
+- `samsun_disciler_altyapi.csv` — ham veri (il/ilçe, website, altyapı,
+  puan/yorum, first_seen/last_seen, is_new)
+- `places_db.json` — kalıcı işletme veritabanı
+- `index.html` — görsel panel (özet sayılar, il/ilçe dağılımı, il + ilçe +
+  durum filtreleri, arama). Script her çalıştığında yeniden üretilir.
 
-## Deploy — otomatik tarama + canlı yayın (GitHub Pages + Actions)
+## Otomatik tarama (GitHub Actions)
 
-1. Bu klasörü GitHub'daki repoya push et.
-2. **API key'i secret olarak ekle:** Repo → Settings → Secrets and
-   variables → Actions → New repository secret
-   - Name: `GOOGLE_PLACES_API_KEY`
-   - Value: senin key'in
-3. **GitHub Pages'i aç:** Repo → Settings → Pages → Source: "Deploy from a
-   branch" → Branch: `main`, klasör: `/ (root)` → Save.
-4. **İlk taramayı manuel tetikle:** Repo → Actions → "Samsun Diş Klinikleri
-   Taraması" → Run workflow.
-5. Panel şurada yayında olur: `https://KULLANICI_ADIN.github.io/REPO_ADIN/`
+- **Haftalık** (Pazartesi 08:00 TR): sadece Samsun — ucuz tazeleme
+- **Aylık** (ayın 1'i): tüm Karadeniz — tam tarama
+- **Manuel**: Actions → "Diş Klinikleri Taraması" → Run workflow → kapsam seç
+- **Push**: `api_versiyon.py` / panel / workflow değişince otomatik Samsun
+  taraması; commit mesajında `[tam]` geçerse Karadeniz taraması
 
-**Not:** Her çalıştırma ~400+ arama sorgusu + ~400 site taraması yapıyor,
-Google'ın aylık 200$'lık ücretsiz kotasının bir kısmını tüketiyor. Haftalık
-tarama fazlasıyla yeterli — günlük çalıştırmaya çevirmeden önce kotayı takip
-et (console.cloud.google.com → APIs & Services → Quotas).
+Kurulum: `GOOGLE_PLACES_API_KEY` secret'ı + GitHub Pages (main / root).
+Panel: `https://KULLANICI_ADIN.github.io/REPO_ADIN/`
+
+**Maliyet notu:** Samsun taraması ~600 arama + ~400 detay çağrısı; tam
+Karadeniz taraması ~2000 arama + ~2000 detay çağrısı yapar. Google'ın
+ücretsiz aylık kotaları çoğunu karşılar ama tam taramayı haftalıktan sık
+çalıştırmadan önce faturayı takip et (console.cloud.google.com → Billing).

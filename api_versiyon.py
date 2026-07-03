@@ -1,27 +1,45 @@
 """
-Samsun'daki dis klinigi/dis hekimi web sitelerinin altyapisini (CMS/framework)
-tespit eden script.
+Dis klinigi/dis hekimi isletmelerini Google Places uzerinden kesfedip web
+sitelerinin altyapisini (CMS/framework) tespit eden script.
 
-Isletme kesfi iki yontemin BIRLESIMI:
-  - Anahtar kelime + ilce metniyle Text Search
-  - Samsun genelini sabit araliklarla (grid) noktalara bolup her noktada
-    Nearby Search (type=dentist) yapmak. Yogun bolgelerde (60 sonuc
-    tavanina carpilirsa) o nokta otomatik olarak kucuk yaricapli alt
-    noktalara bolunur (quad-tree mantigi) - bkz. refine_search().
-Iki yontemin sonuclari place_id'ye gore tekillestirilip birlestirilir.
+KAPSAM (SCAN_SCOPE ortam degiskeni):
+  - "samsun"     : sadece Samsun (varsayilan; haftalik cron bunu kullanir)
+  - "karadeniz"  : PROVINCES sozlugundeki tum iller (aylik cron / [tam] push)
+  - "Samsun,Ordu": virgullu il listesi de verilebilir
 
-Tum agir islemler PARALEL calisir (ThreadPoolExecutor): Text Search
-sorgulari, Grid/Nearby Search noktalari, Place Details + website altyapi
-taramasi.
+KESIF YONTEMLERI:
+  1) Text Search: anahtar kelime x (il + ilceler). Samsun icin genis kelime
+     listesi, diger iller icin cekirdek liste (maliyet kontrolu).
+  2) Grid + Nearby Search (sadece Samsun): il sabit araliklarla noktalara
+     bolunur, her noktada once type=dentist sonra keyword=dis taramasi
+     yapilir. 60 sonuc tavanina carpan yogun noktalar kucuk yaricapli alt
+     noktalara bolunur (quad-tree) - bkz. refine_search().
+
+GUVENILIRLIK:
+  - Tum API cagrilari OVER_QUERY_LIMIT / UNKNOWN_ERROR / ag hatalarinda
+    ustel bekleme (exponential backoff) ile yeniden denenir.
+  - Kalici olarak basarisiz olan sorgular calisma sonunda bir tur daha
+    seri denenir ve ozet olarak raporlanir (sessiz veri kaybi olmaz).
+  - REQUEST_DENIED (key sorunu) tum taramayi hemen durdurur ki eksik
+    sonuc canli panele yazilmasin.
+
+KALICI VERITABANI (places_db.json):
+  Gorulen her isletme first_seen/last_seen tarihleriyle saklanir. Dar
+  kapsamli bir tarama (or. haftalik Samsun) genis taramanin (aylik
+  Karadeniz) sonuclarini SILMEZ; sadece kendi kapsamindaki kayitlari
+  tazeler. 120 gundur gorulmeyen kayitlar dusurulur. "Yeni" etiketi,
+  daha once taranmis bir ILDE ilk kez gorulen isletmeler icindir (yeni
+  bir il kapsama eklendiginde o ilin tum isletmeleri "yeni" sayilmaz).
 
 Kullanim:
     pip install -r requirements.txt
     export GOOGLE_PLACES_API_KEY="senin-api-keyin"
-    python3 api_versiyon.py
+    SCAN_SCOPE=samsun python3 api_versiyon.py
 
 Cikti:
     samsun_disciler_altyapi.csv
     index.html
+    places_db.json
 """
 
 import concurrent.futures
@@ -32,16 +50,18 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
 API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
+SCAN_SCOPE = os.environ.get("SCAN_SCOPE", "samsun").strip()
 OUTPUT_CSV = "samsun_disciler_altyapi.csv"
 TEMPLATE_FILE = "dashboard_template.html"
 OUTPUT_DASHBOARD = "index.html"
-KNOWN_PLACES_FILE = "known_places.json"
+PLACES_DB_FILE = "places_db.json"
 REQUEST_TIMEOUT = 10
+STALE_DAYS = 120  # bu kadar gundur gorulmeyen kayitlar dusurulur
 
 TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 NEARBY_URL = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
@@ -50,37 +70,81 @@ DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 # Paralellik ayarlari
 TEXT_SEARCH_WORKERS = 10
 GRID_WORKERS = 8
-DETAILS_SCAN_WORKERS = 12
+DETAILS_SCAN_WORKERS = 16
 
 # ---------------------------------------------------------------------------
-# YONTEM 1: anahtar kelime + ilce metniyle Text Search
+# Il / ilce verisi
 # ---------------------------------------------------------------------------
+# Not: "Merkez" ilceler listede yok; il adiyla yapilan sorgu merkezi kapsar.
 
-SAMSUN_ILCELERI = [
-    "Atakum", "İlkadım", "Canik", "Tekkeköy", "Ondokuzmayıs", "Bafra",
-    "Çarşamba", "Terme", "Salıpazarı", "Ayvacık", "Vezirköprü", "Havza",
-    "Ladik", "Kavak", "Yakakent", "Alaçam", "Asarcık",
-]
+PROVINCES = {
+    "Samsun": [
+        "Atakum", "İlkadım", "Canik", "Tekkeköy", "Ondokuzmayıs", "Bafra",
+        "Çarşamba", "Terme", "Salıpazarı", "Ayvacık", "Vezirköprü", "Havza",
+        "Ladik", "Kavak", "Yakakent", "Alaçam", "Asarcık",
+    ],
+    "Sinop": ["Ayancık", "Boyabat", "Dikmen", "Durağan", "Erfelek", "Gerze", "Türkeli"],
+    "Ordu": [
+        "Altınordu", "Ünye", "Fatsa", "Perşembe", "Kumru", "Korgan", "Gölköy",
+        "Ulubey", "Gürgentepe", "Mesudiye", "Akkuş", "Aybastı", "Çamaş",
+        "Çatalpınar", "Çaybaşı", "İkizce", "Kabadüz", "Kabataş",
+    ],
+    "Giresun": [
+        "Bulancak", "Espiye", "Görele", "Tirebolu", "Keşap", "Dereli",
+        "Şebinkarahisar", "Alucra", "Yağlıdere", "Piraziz", "Eynesil",
+    ],
+    "Trabzon": [
+        "Ortahisar", "Akçaabat", "Araklı", "Arsin", "Beşikdüzü", "Çarşıbaşı",
+        "Çaykara", "Düzköy", "Maçka", "Of", "Sürmene", "Şalpazarı", "Tonya",
+        "Vakfıkebir", "Yomra",
+    ],
+    "Rize": [
+        "Ardeşen", "Çayeli", "Pazar", "Fındıklı", "Güneysu", "Derepazarı",
+        "İyidere", "Kalkandere", "Çamlıhemşin",
+    ],
+    "Artvin": ["Hopa", "Arhavi", "Borçka", "Şavşat", "Yusufeli", "Ardanuç", "Kemalpaşa"],
+    "Gümüşhane": ["Kelkit", "Şiran", "Torul", "Köse", "Kürtün"],
+    "Bayburt": ["Aydıntepe", "Demirözü"],
+    "Tokat": [
+        "Erbaa", "Turhal", "Niksar", "Zile", "Almus", "Artova", "Pazar",
+        "Reşadiye", "Yeşilyurt", "Başçiftlik",
+    ],
+    "Amasya": ["Merzifon", "Suluova", "Taşova", "Gümüşhacıköy", "Göynücek"],
+    "Çorum": [
+        "Sungurlu", "Osmancık", "İskilip", "Alaca", "Bayat", "Kargı",
+        "Mecitözü", "Ortaköy", "Oğuzlar", "Uğurludağ",
+    ],
+    "Kastamonu": [
+        "Tosya", "Taşköprü", "İnebolu", "Cide", "Araç", "Devrekani",
+        "Bozkurt", "Çatalzeytin", "Daday", "Küre", "Abana", "Azdavay",
+    ],
+    "Karabük": ["Safranbolu", "Yenice", "Eskipazar", "Eflani", "Ovacık"],
+    "Bartın": ["Amasra", "Ulus", "Kurucaşile"],
+    "Zonguldak": ["Ereğli", "Çaycuma", "Devrek", "Alaplı", "Gökçebey", "Kilimli", "Kozlu"],
+    "Düzce": ["Akçakoca", "Kaynaşlı", "Gölyaka", "Çilimli", "Cumayeri", "Gümüşova", "Yığılca"],
+    "Bolu": ["Gerede", "Mengen", "Mudurnu", "Göynük", "Yeniçağa", "Dörtdivan", "Seben"],
+}
 
-# Genisletilmis anahtar kelime listesi: genel terimlerin yanina uzmanlik
-# alani terimleri eklendi (bircok tek hekimli / uzmanlik klinigi sadece
-# bu terimlerle kayitli olabiliyor).
-KEYWORDS = [
-    "diş kliniği", "diş hekimi", "ağız ve diş sağlığı polikliniği",
-    "implant merkezi", "ortodonti", "gülüş tasarımı", "ağız ve çene cerrahisi",
-    "diş polikliniği", "pedodonti", "periodontoloji", "endodonti",
+# Samsun icin genis anahtar kelime listesi (uzmanlik terimleri dahil)
+KEYWORDS_FULL = [
+    "diş kliniği", "diş hekimi", "dişçi", "diş doktoru",
+    "ağız ve diş sağlığı polikliniği", "ağız diş sağlığı merkezi",
+    "diş polikliniği", "diş hastanesi", "dental klinik",
+    "implant merkezi", "ortodonti", "gülüş tasarımı",
+    "ağız ve çene cerrahisi", "pedodonti", "periodontoloji", "endodonti",
     "protetik diş tedavisi", "diş estetiği", "zirkonyum kaplama",
-    "diş beyazlatma", "ağız diş sağlığı merkezi", "dental klinik",
+    "diş beyazlatma",
 ]
 
-SEARCH_QUERIES = [f"{kw} Samsun" for kw in KEYWORDS] + [
-    f"{kw} {ilce} Samsun" for ilce in SAMSUN_ILCELERI for kw in KEYWORDS
+# Diger iller icin cekirdek liste (sorgu maliyetini kontrol altinda tutar;
+# uzmanlik terimleri buyuk oranda ayni isletmeleri dondurur)
+KEYWORDS_CORE = [
+    "diş kliniği", "diş hekimi", "dişçi", "diş doktoru",
+    "ağız ve diş sağlığı", "ortodonti", "implant diş",
 ]
 
-# ---------------------------------------------------------------------------
-# YONTEM 2: grid + Nearby Search (type=dentist), yogun bolgede otomatik bolme
-# ---------------------------------------------------------------------------
-
+# Grid + Nearby Search sadece Samsun icin (en yogun kapsam)
+GRID_PROVINCE = "Samsun"
 LAT_MIN, LAT_MAX = 40.75, 41.95
 LON_MIN, LON_MAX = 34.53, 37.05
 GRID_RADIUS_M = 13000
@@ -88,6 +152,124 @@ LAT_STEP = 0.16
 LON_STEP = 0.22
 REFINE_MAX_DEPTH = 4
 REFINE_MIN_RADIUS_M = 1000
+
+TODAY = datetime.now().strftime("%Y-%m-%d")
+
+
+def resolve_scope():
+    scope = SCAN_SCOPE.lower()
+    if scope in ("samsun", ""):
+        return ["Samsun"]
+    if scope in ("karadeniz", "tam", "hepsi", "all"):
+        return list(PROVINCES)
+    ils = []
+    for part in SCAN_SCOPE.split(","):
+        part = part.strip()
+        match = next((il for il in PROVINCES if tr_lower(il) == tr_lower(part)), None)
+        if not match:
+            sys.exit(f"Hata: bilinmeyen il '{part}'. Gecerli: {', '.join(PROVINCES)}")
+        ils.append(match)
+    return ils
+
+
+def tr_lower(s):
+    return (s or "").replace("İ", "i").replace("I", "ı").lower()
+
+
+# ---------------------------------------------------------------------------
+# API katmani: backoff'lu, kayip vermeyen istek fonksiyonlari
+# ---------------------------------------------------------------------------
+
+class TransientAPIError(Exception):
+    """Tekrar denenip yine basarisiz olan istek."""
+
+
+def api_get(url, params, tries=5):
+    """Places API cagrisi. Gecici hatalarda (kota, ag, pagetoken isinmasi)
+    ustel bekleyerek yeniden dener. REQUEST_DENIED tum taramayi durdurur."""
+    delay = 2
+    last_status = ""
+    for attempt in range(tries):
+        try:
+            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT).json()
+        except (requests.RequestException, ValueError) as exc:
+            last_status = f"ag hatasi: {exc}"
+            time.sleep(delay)
+            delay = min(delay * 2, 32)
+            continue
+
+        status = resp.get("status")
+        if status in ("OK", "ZERO_RESULTS"):
+            return resp
+        if status == "REQUEST_DENIED":
+            sys.exit(f"Hata: REQUEST_DENIED - API key sorunu: {resp.get('error_message', '')}")
+        if status == "INVALID_REQUEST" and "pagetoken" not in params:
+            # pagetoken disinda INVALID_REQUEST kalicidir, denemeye deger degil
+            raise TransientAPIError(f"INVALID_REQUEST: {json.dumps(params, ensure_ascii=False)}")
+
+        # OVER_QUERY_LIMIT / UNKNOWN_ERROR / pagetoken isinmasi -> bekle, tekrar dene
+        last_status = status
+        time.sleep(delay)
+        delay = min(delay * 2, 32)
+
+    raise TransientAPIError(f"{tries} denemede basarisiz ({last_status})")
+
+
+def paged_search(url, params, max_pages=3):
+    """api_get ile sayfalanmis arama; en fazla max_pages sayfa (60 sonuc)."""
+    results = []
+    page = 0
+    while True:
+        resp = api_get(url, params)
+        results.extend(resp.get("results", []))
+        token = resp.get("next_page_token")
+        page += 1
+        if not token or page >= max_pages:
+            return results
+        time.sleep(2)
+        params = {"pagetoken": token, "key": API_KEY}
+
+
+# ---------------------------------------------------------------------------
+# Kesif yontemleri
+# ---------------------------------------------------------------------------
+
+def get_places_text(query):
+    return paged_search(TEXT_SEARCH_URL, {"query": query, "key": API_KEY, "language": "tr"})
+
+
+def nearby_search(lat, lon, radius_m, mode="type"):
+    """Bir noktada Nearby Search. mode='type' -> type=dentist,
+    mode='keyword' -> keyword=diş (kategorisi yanlis girilmis yerler icin)."""
+    params = {"location": f"{lat},{lon}", "radius": radius_m, "language": "tr", "key": API_KEY}
+    if mode == "type":
+        params["type"] = "dentist"
+    else:
+        params["keyword"] = "diş"
+    return paged_search(NEARBY_URL, params)
+
+
+def refine_search(lat, lon, radius_m, mode="type", depth=0):
+    """60 sonuc tavanina carpan yogun noktalari 4 alt noktaya bolup tekrar
+    dener (quad-tree). Bos bolgelerde devreye girmez."""
+    places = nearby_search(lat, lon, radius_m, mode)
+
+    if len(places) < 60 or depth >= REFINE_MAX_DEPTH or radius_m <= REFINE_MIN_RADIUS_M:
+        return places
+
+    sub_radius = max(int(radius_m * 0.6), REFINE_MIN_RADIUS_M)
+    offset_km = (radius_m / 2) / 1000
+    lat_off = offset_km / 111.0
+    lon_off = offset_km / (111.0 * math.cos(math.radians(lat)))
+
+    combined = []
+    for dlat, dlon in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
+        combined.extend(refine_search(
+            round(lat + dlat * lat_off, 5),
+            round(lon + dlon * lon_off, 5),
+            sub_radius, mode, depth + 1,
+        ))
+    return combined
 
 
 def build_grid():
@@ -102,116 +284,53 @@ def build_grid():
     return points
 
 
-def nearby_search(lat, lon, radius_m):
-    """Bir noktada type=dentist ile Nearby Search yapar, gerekirse sayfalar."""
-    results = []
-    params = {
-        "location": f"{lat},{lon}",
-        "radius": radius_m,
-        "type": "dentist",
-        "language": "tr",
-        "key": API_KEY,
-    }
-    page = 0
-    while True:
-        resp = requests.get(NEARBY_URL, params=params, timeout=REQUEST_TIMEOUT).json()
-        status = resp.get("status")
-
-        retries = 0
-        while status == "INVALID_REQUEST" and retries < 4:
-            time.sleep(2 + retries)
-            resp = requests.get(NEARBY_URL, params=params, timeout=REQUEST_TIMEOUT).json()
-            status = resp.get("status")
-            retries += 1
-
-        if status not in ("OK", "ZERO_RESULTS"):
-            print(f"  Nearby hatasi ({lat},{lon}): {status} {resp.get('error_message', '')}", file=sys.stderr)
-            break
-
-        results.extend(resp.get("results", []))
-        token = resp.get("next_page_token")
-        page += 1
-        if not token or page >= 3:
-            break
-
-        time.sleep(2)
-        params = {"pagetoken": token, "key": API_KEY}
-
-    return results
+def build_text_queries(active_ils):
+    queries = []
+    for il in active_ils:
+        keywords = KEYWORDS_FULL if il == "Samsun" else KEYWORDS_CORE
+        queries.extend(f"{kw} {il}" for kw in keywords)
+        queries.extend(f"{kw} {ilce} {il}" for ilce in PROVINCES[il] for kw in keywords)
+    return queries
 
 
-def refine_search(lat, lon, radius_m, depth=0, max_depth=REFINE_MAX_DEPTH, min_radius_m=REFINE_MIN_RADIUS_M):
-    """60 sonuc tavanina carpilan yogun noktalari kucuk yaricapli 4 alt
-    noktaya bolup tekrar dener (quad-tree). Bos bolgelerde devreye girmez."""
-    places = nearby_search(lat, lon, radius_m)
+# 'diş' kelimesi 'dişli' (sanayi) ile karismasin diye negatif bakis kullanilir
+DENTAL_NAME_RE = re.compile(r"diş(?!li)|dent|orto|implant|pedodon|periodon|endodon")
+DENTAL_TYPES = {"dentist", "doctor", "health", "hospital"}
 
-    if len(places) < 60 or depth >= max_depth or radius_m <= min_radius_m:
-        return places
 
-    sub_radius = max(int(radius_m * 0.6), min_radius_m)
-    offset_km = (radius_m / 2) / 1000
-    lat_off = offset_km / 111.0
-    lon_off = offset_km / (111.0 * math.cos(math.radians(lat)))
-
-    combined = []
-    for dlat, dlon in [(1, 1), (1, -1), (-1, 1), (-1, -1)]:
-        combined.extend(refine_search(
-            round(lat + dlat * lat_off, 5),
-            round(lon + dlon * lon_off, 5),
-            sub_radius, depth + 1, max_depth, min_radius_m,
-        ))
-    return combined
+def looks_dental(place):
+    """keyword=diş grid gecisi tip filtresi olmadan calisir; alakasiz
+    isletmeleri (or. adinda 'dişli' gecen sanayi dukkanlari) eler."""
+    if DENTAL_TYPES & set(place.get("types", [])):
+        return True
+    return bool(DENTAL_NAME_RE.search(tr_lower(place.get("name", ""))))
 
 
 # ---------------------------------------------------------------------------
-# Text Search (yontem 1) - sorgu basina sonuc toplama
+# Adres -> il/ilce cikarma
 # ---------------------------------------------------------------------------
 
-def get_places_text(query):
-    places = []
-    params = {"query": query, "key": API_KEY, "language": "tr"}
-    page = 0
+IL_PATTERN = re.compile(
+    r"([^,/]+)/\s*(" + "|".join(re.escape(il) for il in PROVINCES) + r")\b",
+    re.IGNORECASE,
+)
 
-    while True:
-        resp = requests.get(TEXT_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT).json()
-        status = resp.get("status")
 
-        retries = 0
-        while status == "INVALID_REQUEST" and retries < 4:
-            time.sleep(2 + retries)
-            resp = requests.get(TEXT_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT).json()
-            status = resp.get("status")
-            retries += 1
-
-        if status not in ("OK", "ZERO_RESULTS"):
-            print(f"  Text Search hatasi ({query}): {json.dumps(resp, ensure_ascii=False)}", file=sys.stderr)
-            break
-
-        places.extend(resp.get("results", []))
-        token = resp.get("next_page_token")
-        page += 1
-        if not token or page >= 3:
-            break
-
-        time.sleep(2)
-        params = {"pagetoken": token, "key": API_KEY}
-
-    return places
+def extract_location(address):
+    """'... , 55270 Atakum/Samsun, Türkiye' -> ('Samsun', 'Atakum').
+    Il PROVINCES listesinde degilse (None, None) doner (il sizintisi)."""
+    m = IL_PATTERN.search(address or "")
+    if not m:
+        return None, None
+    district = re.sub(r"^\s*\d{4,6}\s+", "", m.group(1)).strip()
+    il_raw = m.group(2)
+    il = next((p for p in PROVINCES if tr_lower(p) == tr_lower(il_raw)), None)
+    return il, (district or "Diğer")
 
 
 # ---------------------------------------------------------------------------
-# Ortak: adres -> ilce cikarma, teknoloji imzalari, site tarama
+# Teknoloji imzalari, site tarama, Place Details
 # ---------------------------------------------------------------------------
-
-def extract_district(address):
-    parts = [p.strip() for p in (address or "").split(",")]
-    for part in reversed(parts):
-        if "/samsun" in part.lower():
-            district = part.split("/")[0].strip()
-            district = re.sub(r"^\d{4,6}\s+", "", district)
-            return district or "Diğer"
-    return "Diğer"
-
 
 FINGERPRINTS = {
     "WordPress": [r"wp-content", r"wp-includes", r"wp-json"],
@@ -231,43 +350,12 @@ FINGERPRINTS = {
 
 
 def get_place_details(place_id):
-    params = {
+    resp = api_get(DETAILS_URL, {
         "place_id": place_id,
         "fields": "name,website,formatted_address,rating,user_ratings_total",
         "key": API_KEY,
-    }
-    resp = requests.get(DETAILS_URL, params=params, timeout=REQUEST_TIMEOUT).json()
+    })
     return resp.get("result", {})
-
-
-def load_known_places():
-    """Onceki taramalarda gorulen place_id -> ilk gorulme tarihi. Dosya yoksa
-    bu ilk calistirmadir; o durumda hicbir isletme 'yeni' olarak isaretlenmez
-    (aksi halde ilk calistirmada TUM isletmeler yanlislikla 'yeni' gorunur)."""
-    is_first_run = not os.path.exists(KNOWN_PLACES_FILE)
-    known = {}
-    if not is_first_run:
-        with open(KNOWN_PLACES_FILE, encoding="utf-8") as f:
-            known = json.load(f)
-    return known, is_first_run
-
-
-def save_known_places(known, current_ids, is_first_run):
-    """Gorulen her place_id'yi (ilk gorulme tarihiyle) kalici dosyaya yazar;
-    yeni isletmeleri de (bir sonraki taramada 'eski' sayilmalari icin) ekler.
-    Dondurdugu set, BU taramada gercekten yeni olan (bootstrap degil) id'ler."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    new_ids = set()
-    for pid in current_ids:
-        if pid not in known:
-            known[pid] = today
-            if not is_first_run:
-                new_ids.add(pid)
-
-    with open(KNOWN_PLACES_FILE, "w", encoding="utf-8") as f:
-        json.dump(known, f, ensure_ascii=False, indent=0)
-
-    return new_ids
 
 
 def detect_stack(url):
@@ -298,81 +386,118 @@ def detect_stack(url):
 
 
 # ---------------------------------------------------------------------------
-# Kesif: iki yontemi paralel calistir + birlestir
+# Kesif: tum yontemleri paralel calistir, basarisizlari raporla
 # ---------------------------------------------------------------------------
 
-def collect_places():
+def run_parallel(tasks, workers, label):
+    """tasks: {aciklama: callable}. Basarili sonuclari (liste listesi) ve
+    basarisiz gorev aciklamalarini dondurur."""
+    results, failed = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(fn): desc for desc, fn in tasks.items()}
+        done = 0
+        for future in concurrent.futures.as_completed(futures):
+            done += 1
+            desc = futures[future]
+            try:
+                results.append(future.result())
+            except TransientAPIError as exc:
+                print(f"  BASARISIZ ({desc}): {exc}", file=sys.stderr)
+                failed.append(desc)
+            except Exception as exc:
+                print(f"  Istisna ({desc}): {exc}", file=sys.stderr)
+                failed.append(desc)
+            if done % 25 == 0 or done == len(futures):
+                print(f"  [{done}/{len(futures)}] {label}")
+    return results, failed
+
+
+def collect_places(active_ils):
     unique = {}
+    active_lower = [tr_lower(il) for il in active_ils]
 
-    # --- Yontem 1: Text Search, paralel ---
-    print(f"[1/2] Text Search: {len(SEARCH_QUERIES)} sorgu, {TEXT_SEARCH_WORKERS} paralel worker")
-    text_found = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=TEXT_SEARCH_WORKERS) as executor:
-        futures = {executor.submit(get_places_text, q): q for q in SEARCH_QUERIES}
-        done = 0
-        for future in concurrent.futures.as_completed(futures):
-            done += 1
-            query = futures[future]
+    def add(place, require_dental_hint=False):
+        if require_dental_hint and not looks_dental(place):
+            return
+        # Text Search adres dondurur; hizli il filtresi (kesin filtre Details
+        # asamasinda). Nearby sonuclarinda formatted_address yoktur -> gecer.
+        addr = tr_lower(place.get("formatted_address", ""))
+        if addr and not any(il in addr for il in active_lower):
+            return
+        unique.setdefault(place["place_id"], place)
+
+    # --- Yontem 1: Text Search ---
+    queries = build_text_queries(active_ils)
+    print(f"[1/2] Text Search: {len(queries)} sorgu, {TEXT_SEARCH_WORKERS} worker")
+    tasks = {q: (lambda q=q: get_places_text(q)) for q in queries}
+    results, failed = run_parallel(tasks, TEXT_SEARCH_WORKERS, "Text Search")
+    for places in results:
+        for p in places:
+            add(p)
+
+    # Basarisiz sorgulari seri olarak bir tur daha dene
+    still_failed = []
+    for q in failed:
+        try:
+            for p in get_places_text(q):
+                add(p)
+        except Exception as exc:
+            print(f"  KALICI BASARISIZ ({q}): {exc}", file=sys.stderr)
+            still_failed.append(q)
+    msg = f"Text Search bitti: {len(unique)} benzersiz isletme"
+    if still_failed:
+        msg += f" ({len(still_failed)} sorgu kalici basarisiz)"
+    print(msg)
+
+    # --- Yontem 2: Grid + Nearby (sadece Samsun kapsamdaysa) ---
+    grid_points = 0
+    if GRID_PROVINCE in active_ils:
+        grid = build_grid()
+        grid_points = len(grid) * 2
+        before = len(unique)
+        print(f"\n[2/2] Grid + Nearby Search: {len(grid)} nokta x 2 gecis (type=dentist, keyword=diş)")
+
+        tasks = {}
+        for lat, lon in grid:
+            tasks[f"type@{lat},{lon}"] = (lambda a=lat, b=lon: refine_search(a, b, GRID_RADIUS_M, "type"))
+            tasks[f"kw@{lat},{lon}"] = (lambda a=lat, b=lon: refine_search(a, b, GRID_RADIUS_M, "keyword"))
+        results, failed = run_parallel(tasks, GRID_WORKERS, "grid")
+        for desc_places in results:
+            for p in desc_places:
+                add(p, require_dental_hint=True)
+        for desc in failed:
+            mode, coords = desc.split("@")
+            lat, lon = map(float, coords.split(","))
             try:
-                places = future.result()
+                for p in refine_search(lat, lon, GRID_RADIUS_M, "type" if mode == "type" else "keyword"):
+                    add(p, require_dental_hint=True)
             except Exception as exc:
-                print(f"  İstisna ({query}): {exc}", file=sys.stderr)
-                continue
-            for place in places:
-                if "samsun" not in place.get("formatted_address", "").lower():
-                    continue
-                if place["place_id"] not in unique:
-                    text_found += 1
-                unique.setdefault(place["place_id"], place)
-            if done % 20 == 0 or done == len(SEARCH_QUERIES):
-                print(f"  [{done}/{len(SEARCH_QUERIES)}] Text Search tamamlandi, su ana kadar: {len(unique)}")
+                print(f"  KALICI BASARISIZ ({desc}): {exc}", file=sys.stderr)
+        print(f"Grid'den eklenen yeni isletme: {len(unique) - before}")
 
-    print(f"Text Search'ten gelen benzersiz: {text_found}")
-
-    # --- Yontem 2: Grid + Nearby Search, paralel ---
-    grid = build_grid()
-    print(f"\n[2/2] Grid + Nearby Search: {len(grid)} nokta, {GRID_WORKERS} paralel worker")
-    grid_found = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=GRID_WORKERS) as executor:
-        futures = {executor.submit(refine_search, lat, lon, GRID_RADIUS_M): (lat, lon) for lat, lon in grid}
-        done = 0
-        for future in concurrent.futures.as_completed(futures):
-            done += 1
-            lat, lon = futures[future]
-            try:
-                places = future.result()
-            except Exception as exc:
-                print(f"  İstisna ({lat},{lon}): {exc}", file=sys.stderr)
-                continue
-            for place in places:
-                if place["place_id"] not in unique:
-                    grid_found += 1
-                unique.setdefault(place["place_id"], place)
-            if done % 20 == 0 or done == len(grid):
-                print(f"  [{done}/{len(grid)}] grid tamamlandi, su ana kadar toplam: {len(unique)}")
-
-    print(f"Grid Nearby Search'ten gelen (Text Search'te olmayan) benzersiz: {grid_found}")
-    print(f"\nToplam benzersiz isletme (birlesik): {len(unique)}")
-
-    # Grid sonuclari formatted_address icermeyebilir (Nearby Search sadece
-    # 'vicinity' dondurur) - Samsun disi il sizintisini eleme islemi zaten
-    # asagida Place Details asamasinda formatted_address ile yapilacak.
-    return list(unique.values())
+    print(f"\nToplam benzersiz isletme (ham): {len(unique)}")
+    return list(unique.values()), len(queries) + grid_points
 
 
-def build_rows(places):
-    print(f"\nPlace Details + website taramasi: {len(places)} isletme, {DETAILS_SCAN_WORKERS} paralel worker")
+# ---------------------------------------------------------------------------
+# Place Details + website taramasi
+# ---------------------------------------------------------------------------
+
+def build_rows(places, active_ils):
+    print(f"\nPlace Details + website taramasi: {len(places)} isletme, {DETAILS_SCAN_WORKERS} worker")
 
     def process(place):
         details = get_place_details(place["place_id"])
         website = details.get("website", "")
         address = details.get("formatted_address") or place.get("formatted_address", "") or place.get("vicinity", "")
+        il, district = extract_location(address)
 
         row = {
             "place_id": place["place_id"],
             "name": details.get("name") or place.get("name", ""),
+            "il": il,
+            "district": district,
             "address": address,
-            "district": extract_district(address),
             "website": website,
             "rating": details.get("rating", ""),
             "review_count": details.get("user_ratings_total", ""),
@@ -382,41 +507,83 @@ def build_rows(places):
             "status_code": "",
             "error": "",
         }
-
         if website:
             row.update(detect_stack(website))
         else:
             row["detected"] = "Website yok"
-
         return row
 
-    rows = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=DETAILS_SCAN_WORKERS) as executor:
-        futures = [executor.submit(process, p) for p in places]
-        done = 0
-        for future in concurrent.futures.as_completed(futures):
-            done += 1
-            try:
-                rows.append(future.result())
-            except Exception as exc:
-                print(f"  İstisna: {exc}", file=sys.stderr)
-            if done % 30 == 0 or done == len(places):
-                print(f"  [{done}/{len(places)}] taramalar tamamlandi")
+    tasks = {p["place_id"]: (lambda p=p: process(p)) for p in places}
+    results, failed = run_parallel(tasks, DETAILS_SCAN_WORKERS, "detay taramasi")
+    if failed:
+        print(f"  {len(failed)} isletmenin detayi alinamadi (bir sonraki taramada tekrar denenir)", file=sys.stderr)
 
-    # Samsun disi il sizintisini burada eleyelim (adres artik kesin biliniyor).
-    rows = [r for r in rows if "samsun" in r["address"].lower()]
+    # Kesin il filtresi: adresi kapsam disi ile cikan kayitlari ele
+    rows = [r for r in results if r["il"] in active_ils]
+    print(f"Kapsam ici isletme: {len(rows)}")
     return rows
 
 
-def write_csv(rows, path):
-    fieldnames = ["place_id", "name", "address", "district", "website", "rating", "review_count", "detected", "server_header", "x_powered_by", "status_code", "error", "is_new"]
+# ---------------------------------------------------------------------------
+# Kalici veritabani (places_db.json)
+# ---------------------------------------------------------------------------
+
+def load_db():
+    if not os.path.exists(PLACES_DB_FILE):
+        return {}, True
+    with open(PLACES_DB_FILE, encoding="utf-8") as f:
+        return json.load(f), False
+
+
+def merge_db(db, rows, is_first_run):
+    """Bu taramanin satirlarini DB ile birlestirir. 'Yeni' = daha once
+    taranmis bir ilde ilk kez gorulen isletme (il bootstrap'i haric)."""
+    prev_ils = {rec.get("il") for rec in db.values()}
+    new_ids = set()
+
+    for row in rows:
+        pid = row["place_id"]
+        if pid in db:
+            first_seen = db[pid].get("first_seen", TODAY)
+        else:
+            first_seen = TODAY
+            if not is_first_run and row["il"] in prev_ils:
+                new_ids.add(pid)
+        db[pid] = {**row, "first_seen": first_seen, "last_seen": TODAY}
+
+    # Uzun suredir gorulmeyen kayitlari dusur (kapanmis/tasinmis isletmeler)
+    cutoff = (datetime.now() - timedelta(days=STALE_DAYS)).strftime("%Y-%m-%d")
+    stale = [pid for pid, rec in db.items() if rec.get("last_seen", TODAY) < cutoff]
+    for pid in stale:
+        del db[pid]
+    if stale:
+        print(f"{len(stale)} eski kayit dusuruldu ({STALE_DAYS} gundur gorulmuyor)")
+
+    with open(PLACES_DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=0, sort_keys=True)
+
+    return new_ids
+
+
+# ---------------------------------------------------------------------------
+# Ciktilar: CSV + panel
+# ---------------------------------------------------------------------------
+
+CSV_FIELDS = [
+    "place_id", "name", "il", "district", "address", "website", "rating",
+    "review_count", "detected", "server_header", "x_powered_by",
+    "status_code", "error", "first_seen", "last_seen", "is_new",
+]
+
+
+def write_csv(records, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(records)
 
 
-def write_dashboard(rows, path, template_path, query_count):
+def write_dashboard(records, path, template_path, query_count):
     with open(template_path, "r", encoding="utf-8") as f:
         template = f.read()
 
@@ -424,6 +591,7 @@ def write_dashboard(rows, path, template_path, query_count):
         {
             "name": r["name"],
             "address": r["address"],
+            "il": r["il"],
             "district": r["district"],
             "website": r["website"],
             "detected": r["detected"],
@@ -432,7 +600,7 @@ def write_dashboard(rows, path, template_path, query_count):
             "reviewCount": r["review_count"] or 0,
             "isNew": bool(r.get("is_new")),
         }
-        for r in rows
+        for r in records
     ]
 
     meta = {
@@ -453,31 +621,42 @@ def write_dashboard(rows, path, template_path, query_count):
 def main():
     if not API_KEY:
         sys.exit("Hata: GOOGLE_PLACES_API_KEY ortam değişkeni tanımlı değil.")
-
     if not os.path.exists(TEMPLATE_FILE):
         sys.exit(f"Hata: {TEMPLATE_FILE} bulunamadı. Script ile aynı klasörde olmalı.")
 
+    active_ils = resolve_scope()
+    print(f"Tarama kapsamı: {', '.join(active_ils)} ({len(active_ils)} il)\n")
+
     start = time.time()
 
-    places = collect_places()
-    rows = build_rows(places)
+    places, query_count = collect_places(active_ils)
+    rows = build_rows(places, active_ils)
 
-    known, is_first_run = load_known_places()
-    current_ids = {r["place_id"] for r in rows}
-    new_ids = save_known_places(known, current_ids, is_first_run)
-    for r in rows:
-        r["is_new"] = r["place_id"] in new_ids
+    db, is_first_run = load_db()
+    new_ids = merge_db(db, rows, is_first_run)
     if is_first_run:
-        print(f"\n{KNOWN_PLACES_FILE} ilk kez oluşturuldu, bu taramada hiçbir işletme 'yeni' işaretlenmedi (referans temeli).")
+        print(f"\n{PLACES_DB_FILE} ilk kez oluşturuldu; bu taramada 'yeni' etiketi yok (referans temeli).")
     else:
         print(f"\nBu taramada gerçekten yeni tespit edilen işletme: {len(new_ids)}")
 
-    write_csv(rows, OUTPUT_CSV)
-    print(f"CSV yazıldı: {OUTPUT_CSV} ({len(rows)} satır)")
+    # Panel/CSV her zaman DB'nin TAMAMINI gosterir (dar kapsamli tarama
+    # genis taramanin sonuclarini gizlemez)
+    records = sorted(db.values(), key=lambda r: (r.get("il") or "", r.get("district") or "", r.get("name") or ""))
+    for r in records:
+        r["is_new"] = r["place_id"] in new_ids
 
-    total_query_count = len(SEARCH_QUERIES) + len(build_grid())
-    write_dashboard(rows, OUTPUT_DASHBOARD, TEMPLATE_FILE, total_query_count)
+    write_csv(records, OUTPUT_CSV)
+    print(f"CSV yazıldı: {OUTPUT_CSV} ({len(records)} satır)")
+
+    write_dashboard(records, OUTPUT_DASHBOARD, TEMPLATE_FILE, query_count)
     print(f"Panel oluşturuldu: {OUTPUT_DASHBOARD}")
+
+    il_counts = {}
+    for r in records:
+        il_counts[r["il"]] = il_counts.get(r["il"], 0) + 1
+    print("\nİl bazında toplam:")
+    for il, c in sorted(il_counts.items(), key=lambda x: -x[1]):
+        print(f"  {il}: {c}")
 
     elapsed = time.time() - start
     print(f"\nToplam süre: {elapsed / 60:.1f} dakika")

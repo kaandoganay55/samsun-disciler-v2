@@ -1,9 +1,22 @@
-name: Samsun Diş Klinikleri Taraması
+name: Diş Klinikleri Taraması
 
 on:
   schedule:
-    - cron: "0 5 * * 1"
-  workflow_dispatch: {}
+    - cron: "0 5 * * 1"   # haftalık (Pazartesi 08:00 TR): sadece Samsun — ucuz tazeleme
+    - cron: "0 3 1 * *"   # aylık (ayın 1'i): tüm Karadeniz — tam tarama
+  workflow_dispatch:
+    inputs:
+      kapsam:
+        description: "Tarama kapsamı"
+        type: choice
+        options: [samsun, karadeniz]
+        default: samsun
+  push:
+    branches: [main]
+    paths:
+      - api_versiyon.py
+      - dashboard_template.html
+      - .github/workflows/scan.yml
 
 permissions:
   contents: write
@@ -17,14 +30,36 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
+
+      # Kapsam: dispatch -> seçilen; aylık cron -> karadeniz; push -> commit
+      # mesajında [tam] varsa karadeniz; diğer her şey -> samsun
+      - name: Kapsamı belirle
+        id: kapsam
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          KAPSAM=samsun
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            KAPSAM="${{ inputs.kapsam }}"
+          elif [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" = "0 3 1 * *" ]; then
+            KAPSAM=karadeniz
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            case "$COMMIT_MSG" in *"[tam]"*) KAPSAM=karadeniz ;; esac
+          fi
+          echo "kapsam=$KAPSAM" >> "$GITHUB_OUTPUT"
+          echo "Tarama kapsamı: $KAPSAM"
+
       - name: Taramayı çalıştır
         env:
           GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
+          SCAN_SCOPE: ${{ steps.kapsam.outputs.kapsam }}
         run: python3 api_versiyon.py
+
       - name: Sonuçları commitle ve yayınla
         run: |
           git config user.name "samsun-disci-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add index.html samsun_disciler_altyapi.csv known_places.json
-          git diff --staged --quiet || git commit -m "Otomatik tarama güncellemesi $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main || true
+          git add index.html samsun_disciler_altyapi.csv places_db.json
+          git diff --staged --quiet || git commit -m "Otomatik tarama güncellemesi $(date -u +%Y-%m-%d) [${{ steps.kapsam.outputs.kapsam }}]"
           git push

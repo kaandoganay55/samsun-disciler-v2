@@ -1,4 +1,4 @@
-<title>Samsun Diş Klinikleri — Web Altyapı Denetimi</title>
+<title id="docTitle">Samsun Diş Klinikleri — Web Altyapı Denetimi</title>
 <style>
   :root {
     --paper:       #eef1ec;
@@ -332,10 +332,10 @@
   <div class="masthead">
     <div class="masthead-main">
       <p class="eyebrow">Teknoloji Tarama Raporu</p>
-      <h1 class="serif">Samsun Diş Klinikleri — Web <em>Altyapı</em> Denetimi</h1>
+      <h1 class="serif" id="pageTitle">Samsun Diş Klinikleri — Web <em>Altyapı</em> Denetimi</h1>
       <p class="meta">
         Google Places (Text Search + Nearby Search, birleşik tarama) üzerinden
-        Samsun'un <b id="metaDistricts">0</b> ilçesinde bulunan
+        <b id="metaProvinces">1</b> ildeki <b id="metaDistricts">0</b> ilçede bulunan
         <b id="metaTotal">0</b> işletmenin web sitesi incelenip kullandıkları
         altyapı (CMS/framework) tespit edildi.
       </p>
@@ -370,7 +370,7 @@
   </section>
 
   <section>
-    <h2>İlçelere Göre Dağılım <span class="count" id="districtCount"></span></h2>
+    <h2><span id="regionTitle">İlçelere Göre Dağılım</span> <span class="count" id="districtCount"></span></h2>
     <div class="panel-card"><div class="bars bars-grid" id="districtBars"></div></div>
   </section>
 
@@ -426,6 +426,19 @@
     error:  '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.6" stroke="currentColor" stroke-width="1.6"/><path d="M6.2 6.2l3.6 3.6M9.8 6.2l-3.6 3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>'
   };
 
+  // --- il boyutu: tek il -> eski Samsun gorunumu, cok il -> bolge gorunumu ---
+  const ilCounts = {};
+  DATA.forEach(d => { const k = d.il || "Diğer"; ilCounts[k] = (ilCounts[k] || 0) + 1; });
+  const ilEntries = Object.entries(ilCounts).sort((a, b) => b[1] - a[1]);
+  const multiIl = ilEntries.length > 1;
+
+  if (multiIl) {
+    const t = "Karadeniz Diş Klinikleri — Web Altyapı Denetimi";
+    document.title = t;
+    document.getElementById("pageTitle").innerHTML = 'Karadeniz Diş Klinikleri — Web <em>Altyapı</em> Denetimi';
+  }
+  document.getElementById("metaProvinces").textContent = ilEntries.length;
+
   const total = DATA.length;
   document.getElementById("tTotal").textContent = total;
   document.getElementById("tSite").textContent = DATA.filter(d => d.website).length;
@@ -457,22 +470,28 @@
     barsEl.appendChild(row);
   });
 
-  // --- ilcelere gore dagilim ---
+  // --- bolgesel dagilim: cok il varsa il barlari, tek ilse ilce barlari ---
   const districtCounts = {};
   DATA.forEach(d => { const k = d.district || "Diğer"; districtCounts[k] = (districtCounts[k] || 0) + 1; });
   const districtEntries = Object.entries(districtCounts).sort((a, b) => b[1] - a[1]);
-  const maxDistrict = Math.max(1, ...districtEntries.map(e => e[1]));
-  document.getElementById("districtCount").textContent = `${districtEntries.length} ilçe`;
-  document.getElementById("metaDistricts").textContent = districtEntries.length;
+
+  const uniqueDistricts = new Set(DATA.map(d => `${d.il}|${d.district || "Diğer"}`));
+  document.getElementById("metaDistricts").textContent = uniqueDistricts.size;
+
+  const regionEntries = multiIl ? ilEntries : districtEntries;
+  document.getElementById("regionTitle").textContent = multiIl ? "İllere Göre Dağılım" : "İlçelere Göre Dağılım";
+  document.getElementById("districtCount").textContent = multiIl
+    ? `${ilEntries.length} il` : `${districtEntries.length} ilçe`;
+  const maxRegion = Math.max(1, ...regionEntries.map(e => e[1]));
 
   const districtBarsEl = document.getElementById("districtBars");
-  districtEntries.forEach(([name, count]) => {
+  regionEntries.forEach(([name, count]) => {
     const row = document.createElement("div");
     row.className = "bar-row";
     row.title = `${name}: ${count} işletme (%${total ? Math.round(count / total * 100) : 0})`;
     row.innerHTML = `
       <div class="label">${name}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(count / maxDistrict * 100).toFixed(1)}%; background:var(--accent)"></div></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(count / maxRegion * 100).toFixed(1)}%; background:var(--accent)"></div></div>
       <div class="count">${count}</div>
     `;
     districtBarsEl.appendChild(row);
@@ -488,6 +507,7 @@
     { key: "wp", label: `WordPress (${counts.wp})` }
   ];
   let activeFilter = "all";
+  let activeIl = "all";
   let activeDistrict = "all";
   let onlyNew = false;
   let searchTerm = "";
@@ -517,10 +537,32 @@
   });
   filtersEl.appendChild(newToggle);
 
+  if (multiIl) {
+    const ilSelect = document.createElement("select");
+    ilSelect.className = "select";
+    ilSelect.innerHTML = `<option value="all">Tüm iller</option>` +
+      ilEntries.map(([name, count]) => `<option value="${name}">${name} (${count})</option>`).join("");
+    ilSelect.addEventListener("change", () => {
+      activeIl = ilSelect.value;
+      activeDistrict = "all";
+      fillDistrictSelect();
+      render();
+    });
+    filtersEl.appendChild(ilSelect);
+  }
+
   const districtSelect = document.createElement("select");
   districtSelect.className = "select";
-  districtSelect.innerHTML = `<option value="all">Tüm ilçeler</option>` +
-    districtEntries.map(([name, count]) => `<option value="${name}">${name} (${count})</option>`).join("");
+  function fillDistrictSelect() {
+    const pool = activeIl === "all" ? DATA : DATA.filter(d => d.il === activeIl);
+    const counts = {};
+    pool.forEach(d => { const k = d.district || "Diğer"; counts[k] = (counts[k] || 0) + 1; });
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    districtSelect.innerHTML = `<option value="all">Tüm ilçeler</option>` +
+      entries.map(([name, count]) => `<option value="${name}">${name} (${count})</option>`).join("");
+    districtSelect.value = "all";
+  }
+  fillDistrictSelect();
   districtSelect.addEventListener("change", () => { activeDistrict = districtSelect.value; render(); });
   filtersEl.appendChild(districtSelect);
 
@@ -556,7 +598,8 @@
     const rows = sorted.filter(d => {
       const st = statusOf(d);
       if (activeFilter !== "all" && st.key !== activeFilter) return false;
-      if (activeDistrict !== "all" && d.district !== activeDistrict) return false;
+      if (activeIl !== "all" && d.il !== activeIl) return false;
+      if (activeDistrict !== "all" && (d.district || "Diğer") !== activeDistrict) return false;
       if (onlyNew && !d.isNew) return false;
       if (searchTerm && !(d.name.toLowerCase().includes(searchTerm) || d.address.toLowerCase().includes(searchTerm))) return false;
       return true;
@@ -580,9 +623,10 @@
 
       const tr = document.createElement("tr");
       if (d.error) tr.title = d.error;
+      const locLabel = multiIl ? `${d.district || "Diğer"} · ${d.il}` : (d.district || "Diğer");
       tr.innerHTML = `
         <td class="name">${d.name}${newBadge}${ratingLine(d)}</td>
-        <td class="district">${d.district || "Diğer"}</td>
+        <td class="district">${locLabel}</td>
         <td class="addr">${d.address}</td>
         <td class="site">${siteCellDesktop}</td>
         <td><span class="pill ${st.cls}">${ICONS[st.key]}${st.label}</span></td>
@@ -599,7 +643,7 @@
         <div class="row1">
           <div>
             <div class="name">${d.name}${newBadge}</div>
-            <div class="sub">${d.district || "Diğer"}</div>
+            <div class="sub">${locLabel}</div>
             ${ratingLine(d)}
           </div>
         </div>
