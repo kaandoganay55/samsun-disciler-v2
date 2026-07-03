@@ -152,6 +152,9 @@ LAT_STEP = 0.16
 LON_STEP = 0.22
 REFINE_MAX_DEPTH = 4
 REFINE_MIN_RADIUS_M = 1000
+# Sayfalama tokeni bozuk key'lerde bir nokta en fazla 20 sonuc dondurebilir;
+# bu yuzden bolme esigi 60 degil 20'dir (tam sayfa = muhtemelen kesilmis sonuc)
+REFINE_THRESHOLD = 20
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
 
@@ -215,12 +218,28 @@ def api_get(url, params, tries=5):
     raise TransientAPIError(f"{tries} denemede basarisiz ({last_status})")
 
 
+PAGETOKEN_BROKEN = False
+
+
 def paged_search(url, params, max_pages=3):
-    """api_get ile sayfalanmis arama; en fazla max_pages sayfa (60 sonuc)."""
+    """api_get ile sayfalanmis arama; en fazla max_pages sayfa (60 sonuc).
+
+    Yeni API key'lerde legacy API'nin next_page_token'i kalici olarak
+    INVALID_REQUEST donebiliyor. Bu durumda eldeki sayfalarin sonuclari
+    ASLA cope atilmaz; toplanan sonuclarla devam edilir."""
+    global PAGETOKEN_BROKEN
     results = []
     page = 0
     while True:
-        resp = api_get(url, params)
+        try:
+            # pagetoken istekleri icin sabir kisa tutulur: token bozuksa
+            # (yeni key'lerde yaygin) uzun backoff sadece zaman kaybi
+            resp = api_get(url, params, tries=3 if "pagetoken" in params else 5)
+        except TransientAPIError:
+            if page == 0:
+                raise  # ilk sayfa bile alinamadi -> sorgu gercekten basarisiz
+            PAGETOKEN_BROKEN = True
+            return results  # sayfalama coktu; ilk sayfa(lar) elimizde kalsin
         results.extend(resp.get("results", []))
         token = resp.get("next_page_token")
         page += 1
@@ -254,7 +273,7 @@ def refine_search(lat, lon, radius_m, mode="type", depth=0):
     dener (quad-tree). Bos bolgelerde devreye girmez."""
     places = nearby_search(lat, lon, radius_m, mode)
 
-    if len(places) < 60 or depth >= REFINE_MAX_DEPTH or radius_m <= REFINE_MIN_RADIUS_M:
+    if len(places) < REFINE_THRESHOLD or depth >= REFINE_MAX_DEPTH or radius_m <= REFINE_MIN_RADIUS_M:
         return places
 
     sub_radius = max(int(radius_m * 0.6), REFINE_MIN_RADIUS_M)
@@ -476,6 +495,9 @@ def collect_places(active_ils):
         print(f"Grid'den eklenen yeni isletme: {len(unique) - before}")
 
     print(f"\nToplam benzersiz isletme (ham): {len(unique)}")
+    if PAGETOKEN_BROKEN:
+        print("Uyari: sayfalama tokeni bu API key'de calismiyor (legacy API kisiti);"
+              " sorgu basina en fazla 20 sonuc alinabildi. Grid bolme esigi (20) bunu telafi eder.")
     return list(unique.values()), len(queries) + grid_points
 
 

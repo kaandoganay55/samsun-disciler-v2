@@ -21,6 +21,11 @@ on:
 permissions:
   contents: write
 
+# Yeni bir tarama tetiklenirse sureni doldurmamis eskisini iptal et
+concurrency:
+  group: scan
+  cancel-in-progress: true
+
 jobs:
   scan:
     runs-on: ubuntu-latest
